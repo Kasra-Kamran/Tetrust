@@ -1,0 +1,23 @@
+[package]
+name = "Tetrust_WebServer"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio-tungstenite = "*"
+log = "0.4"
+futures-channel = "0.3"
+hyper = { version = "0.14", default-features = false, features = ["http1", "server", "tcp"] }
+url = "2.0.0"
+env_logger = "0.9"
+tungstenite = "*"
+rand = "0.8.4"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio = {version = "*", features = ["full"]}
+async-channel = "1.8.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
