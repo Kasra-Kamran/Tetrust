@@ -30,10 +30,16 @@ pub enum Event
     Undroppable,
 }
 
+pub enum Undroppable
+{
+    Immovable(Vec<(usize, usize)>),
+    Lost(Vec<(usize, usize)>),
+}
+
 pub struct Tetris
 {
     pub board: Board<u8>,
-    current_shape: Option<u8>,
+    pub current_shape: Option<u8>,
     center: Option<(f32, f32)>,
     pub current_piece: Option<Vec<(usize, usize)>>,
 }
@@ -146,7 +152,7 @@ impl Tetris
         points
     }
 
-    pub fn move_to(&mut self, piece: &mut Vec<(usize, usize)>, direction: char) -> Result<Vec<(usize, usize)>, Vec<(usize, usize)>>
+    pub fn move_to(&mut self, piece: &mut Vec<(usize, usize)>, direction: char) -> Result<Vec<(usize, usize)>, Undroppable>
     {
         // TODO: change this function.
         // first make points zero.
@@ -155,7 +161,15 @@ impl Tetris
         let mut points = piece.to_vec();
         if !self.movable_to(&points, direction)
         {
-            return Result::Err(points);
+            let (mut smallest_y,
+                mut smallest_x,
+                mut biggest_y,
+                mut biggest_x,) = Self::dimensions(&points);
+            if smallest_y == 0 && direction == 'D'
+            {
+                return Result::Err(Undroppable::Lost(points));
+            }
+            return Result::Err(Undroppable::Immovable(points));
         }
         let mut new_points: Vec<(usize, usize)> = vec![];
         for (i, (y, x)) in points.iter().enumerate()

@@ -1,6 +1,7 @@
 mod tetris;
 use tetris::Tetris;
 use tetris::Board;
+use tetris::Undroppable;
 use tokio_tungstenite::{accept_async, WebSocketStream};
 use tokio::{sync::{broadcast, mpsc}, time::sleep, net::{TcpListener, TcpStream}, task::JoinHandle};
 use tungstenite::protocol::Message;
@@ -22,10 +23,21 @@ pub struct WebTetris
 }
 
 #[derive(Serialize, Debug)]
+pub enum Game_Status
+{
+    Lost,
+    Won,
+    Ongoing,
+}
+
+#[derive(Serialize, Debug)]
 pub struct Data
 {
     player_id: i16,
     board: Vec<Vec<u8>>,
+    status: Game_Status,
+    piece: Vec<(usize, usize)>,
+    piece_number: u8,
 }
 
 impl WebTetris
@@ -136,6 +148,11 @@ impl WebTetris
         webtetris.tetris.current_piece = Some(webtetris.tetris.insert_random_shape());
         loop
         {
+            let mut current_piece = vec![];
+            if let Some(piece) = webtetris.tetris.current_piece.clone()
+            {
+                current_piece = piece;
+            }
             let mut msg = Command::Rotate;
             if let Ok(m) = command_channel.recv().await
             {
@@ -164,14 +181,51 @@ impl WebTetris
                     {
                         piece = p.clone();
                     }
-                    if let Ok(p) = webtetris.tetris.move_to(&mut piece, c)
+                    match webtetris.tetris.move_to(&mut piece, c)
                     {
-                        webtetris.tetris.current_piece = Some(p.clone());
-                    }
-                    else if c == 'D'
-                    {
-                        event_channel.try_send(Event::Undroppable);
-                    }
+                        Ok(p) =>
+                        {
+                            webtetris.tetris.current_piece = Some(p.clone());
+                        },
+                        Err(u) =>
+                        {
+                            match u
+                            {
+                                Undroppable::Immovable(p) =>
+                                {
+                                    if c == 'D'
+                                    {
+                                        event_channel.try_send(Event::Undroppable);
+                                    }
+                                },
+                                Undroppable::Lost(p) => 
+                                {
+                                    let mut pn: u8 = 0;
+                                    if let Some(n) = webtetris.tetris.current_shape
+                                    {
+                                        pn = n;
+                                    }
+                                    let data = Data
+                                    {
+                                        player_id: webtetris.player_id,
+                                        board: webtetris.tetris.board.get_matrix(),
+                                        status: Game_Status::Lost,
+                                        piece: current_piece,
+                                        piece_number: pn,
+                                    };
+                                    let m = Message::binary(serde_json::to_string(&data).unwrap());
+                                    for (_, receiver) in state_receivers.iter().enumerate()
+                                    {
+                                        let m2 = m.clone();
+                                        receiver.unbounded_send(m2);
+                                    }
+                                    kill_coroutines.send(true);
+                                    confirm_kill.recv().await;
+                                    break;
+                                },
+                            };
+                        },
+                    };
                 },
                 Command::InsertPiece =>
                 {
@@ -181,10 +235,18 @@ impl WebTetris
                 },
                 Command::Refresh =>
                 {
+                    let mut pn: u8 = 0;
+                    if let Some(n) = webtetris.tetris.current_shape
+                    {
+                        pn = n;
+                    }
                     let data = Data
                     {
                         player_id: webtetris.player_id,
                         board: webtetris.tetris.board.get_matrix(),
+                        status: Game_Status::Ongoing,
+                        piece: current_piece,
+                        piece_number: pn,
                     };
                     let m = Message::binary(serde_json::to_string(&data).unwrap());
                     for (_, receiver) in state_receivers.iter().enumerate()
