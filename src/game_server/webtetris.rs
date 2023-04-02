@@ -145,7 +145,9 @@ impl WebTetris
         mut confirm_kill: mpsc::Receiver<bool>,
         state_receivers: Vec<futures_channel::mpsc::UnboundedSender<Message>>)
     {
+        let mut augh: bool = false;
         webtetris.tetris.current_piece = Some(webtetris.tetris.insert_random_shape());
+        let mut i: i16 = 0;
         loop
         {
             let mut current_piece = vec![];
@@ -162,6 +164,46 @@ impl WebTetris
 
             match msg
             {
+                Command::Hard_Drop =>
+                {
+                    let mut piece = vec![];
+                    if let Some(p) = webtetris.tetris.current_piece.clone()
+                    {
+                        piece = p.clone();
+                    }
+                    match webtetris.tetris.hard_drop(&mut piece)
+                    {
+                        Undroppable::Immovable(p) =>
+                        {
+                            webtetris.tetris.current_piece = Some(p);
+                        },
+                        Undroppable::Lost(_) =>
+                        {
+                            let mut pn: u8 = 0;
+                            if let Some(n) = webtetris.tetris.current_shape
+                            {
+                                pn = n;
+                            }
+                            let data = Data
+                            {
+                                player_id: webtetris.player_id,
+                                board: webtetris.tetris.board.get_matrix(),
+                                status: Game_Status::Lost,
+                                piece: current_piece,
+                                piece_number: pn,
+                            };
+                            let m = Message::binary(serde_json::to_string(&data).unwrap());
+                            for (_, receiver) in state_receivers.iter().enumerate()
+                            {
+                                let m2 = m.clone();
+                                receiver.unbounded_send(m2);
+                            }
+                            kill_coroutines.send(true);
+                            confirm_kill.recv().await;
+                            break;
+                        },
+                    };
+                }
                 Command::Rotate =>
                 {
                     let mut piece = vec![];
@@ -318,6 +360,7 @@ impl WebTetris
             "move_right" => Some(Command::Move('R')),
             "move_left" => Some(Command::Move('L')),
             "end_game" => Some(Command::End),
+            "hard_drop" => Some(Command::Hard_Drop),
             _ => None
         }
     }

@@ -23,6 +23,7 @@ pub enum Command
     Refresh,
     ClearLines,
     End,
+    Hard_Drop,
 }
 
 pub enum Event
@@ -108,7 +109,7 @@ impl Tetris
                             loop
                             {
                                 tx3.try_send(Command::Refresh);
-                                sleep(Duration::from_millis(25)).await;
+                                sleep(Duration::from_millis(50)).await;
                             }
                         } => {}
                     };
@@ -136,6 +137,11 @@ impl Tetris
         let mut center = self.shape_center();
         center.1 += starting_column as f32;
         self.center = Option::Some(center);
+        let mut current_shape: u8 = 0;
+        if let Some(p) = self.current_shape
+        {
+            current_shape = p;
+        }
 
         let mut points: Vec<(usize, usize)> = vec![];
         for (i, row) in shape.iter().enumerate()
@@ -144,7 +150,7 @@ impl Tetris
             {
                 if *element == 1
                 {
-                    self.board.set_element(i, j + starting_column, *element);
+                    self.board.set_element(i, j + starting_column, current_shape);
                     points.push((i, j + starting_column));
                 }
             }
@@ -154,10 +160,6 @@ impl Tetris
 
     pub fn move_to(&mut self, piece: &mut Vec<(usize, usize)>, direction: char) -> Result<Vec<(usize, usize)>, Undroppable>
     {
-        // TODO: change this function.
-        // first make points zero.
-        // then make new_points one.
-        // it's literally that easy.
         let mut points = piece.to_vec();
         if !self.movable_to(&points, direction)
         {
@@ -171,8 +173,14 @@ impl Tetris
             }
             return Result::Err(Undroppable::Immovable(points));
         }
+        let mut shapes: Vec<u8> = vec![];
         let mut new_points: Vec<(usize, usize)> = vec![];
         for (i, (y, x)) in points.iter().enumerate()
+        {
+            shapes.push(*self.board.get_element(*y, *x));
+            self.board.set_element(*y, *x, 0);
+        }
+        for (i, (y, x)) in points.into_iter().enumerate()
         {
             let new_point: (usize, usize) = match direction
             {
@@ -181,20 +189,8 @@ impl Tetris
                 'L' => (y.clone(), x.clone() - 1),
                 _ => panic!(),
             };
-            self.board.set_element(new_point.0, new_point.1, 1);
+            self.board.set_element(new_point.0, new_point.1, shapes[i]);
             new_points.push(new_point);
-        }
-        for (i, point) in new_points.iter().enumerate()
-        {
-            match find(&points, point)
-            {
-                Result::Ok(index) => points.swap_remove(index),
-                Result::Err(_) => (0, 0),
-            };
-        }
-        for point in points
-        {
-            self.board.set_element(point.0, point.1, 0);
         }
         match self.center
         {
@@ -288,21 +284,21 @@ impl Tetris
             {
                 'D' =>
                 {
-                    if point.0 == 21 || *self.board.get_element(point.0 + 1, point.1) == 1
+                    if point.0 == 21 || *self.board.get_element(point.0 + 1, point.1) > 0
                     {
                         return false;
                     }
                 },
                 'R' =>
                 {
-                    if point.1 == 9 || *self.board.get_element(point.0, point.1 + 1) == 1
+                    if point.1 == 9 || *self.board.get_element(point.0, point.1 + 1) > 0
                     {
                         return false;
                     }
                 },
                 'L' =>
                 {
-                    if point.1 == 0 || *self.board.get_element(point.0, point.1 - 1) == 1
+                    if point.1 == 0 || *self.board.get_element(point.0, point.1 - 1) > 0
                     {
                         return false;
                     }
@@ -313,21 +309,35 @@ impl Tetris
         true
     }
 
+    pub fn hard_drop(&mut self, piece: &Vec<(usize, usize)>) -> Undroppable
+    {
+        let mut points: Vec<(usize, usize)> = piece.to_vec();
+        while let Ok(p) = self.move_to(&mut points, 'D')
+        {
+            points = p;
+        }
+        match self.move_to(&mut points, 'D')
+        {
+            Err(e) => e,
+            _ => panic!(),
+        }
+    }
+
     pub fn insert_random_shape(&mut self) -> Vec<(usize, usize)>
     {
-        let range = Uniform::from(0..7);
+        let range = Uniform::from(1..=7);
         let mut rng = thread_rng();
         let shape = range.sample(&mut rng);
         self.current_shape = Some(shape);
         match shape
         {
-            0 => self.insert_shape::<3, 2>(T),
-            1 => self.insert_shape::<3, 2>(L1),
-            2 => self.insert_shape::<3, 2>(L2),
-            3 => self.insert_shape::<3, 2>(N1),
-            4 => self.insert_shape::<3, 2>(N2),
-            5 => self.insert_shape::<2, 2>(S),
-            6 => self.insert_shape::<4, 1>(L),
+            1 => self.insert_shape::<3, 2>(T),
+            2 => self.insert_shape::<3, 2>(L1),
+            3 => self.insert_shape::<3, 2>(L2),
+            4 => self.insert_shape::<3, 2>(N1),
+            5 => self.insert_shape::<3, 2>(N2),
+            6 => self.insert_shape::<2, 2>(S),
+            7 => self.insert_shape::<4, 1>(L),
             _ => vec![],
         }
     }
@@ -404,6 +414,7 @@ impl Tetris
     {
         let points = piece.to_vec();
         let mut shape_matrix = Board::from(self.shape_matrix(&points));
+        
         shape_matrix.rotate_clockwise();
         self.set_points_to(&points, 0);
 
@@ -419,6 +430,11 @@ impl Tetris
         let max_x: isize = (center.1 + ((length - 1.0) / 2.0) as f32) as isize;
         let mut m = 0;
         let mut n = 0;
+        let mut current_shape: u8 = 0;
+        if let Some(c) = self.current_shape
+        {
+            current_shape = c;
+        }
         for i in min_y..=max_y
         {
             n = 0;
@@ -426,9 +442,9 @@ impl Tetris
             {
                 if !Self::validate_coordinates((i, j))
                 {
-                    if *shape_matrix.get_element(m as usize, n as usize) == 1
+                    if *shape_matrix.get_element(m as usize, n as usize) > 0
                     {
-                        self.set_points_to(&points, 1);
+                        self.set_points_to(&points, current_shape);
                         return Result::Err(points);
                     }
                     else
@@ -437,11 +453,11 @@ impl Tetris
                         continue;
                     }
                 }
-                if *self.board.get_element(i as usize, j as usize) == 1
+                if *self.board.get_element(i as usize, j as usize) > 0
                 {
-                    if *shape_matrix.get_element(m as usize, n as usize) == 1
+                    if *shape_matrix.get_element(m as usize, n as usize) > 0
                     {
-                        self.set_points_to(&points, 1);
+                        self.set_points_to(&points, current_shape);
                         return Result::Err(points);
                     }
                 }
@@ -458,9 +474,9 @@ impl Tetris
             n = 0;
             for j in min_x..=max_x
             {
-                if *shape_matrix.get_element(m as usize, n as usize) == 1
+                if *shape_matrix.get_element(m as usize, n as usize) > 0
                 {
-                    self.board.set_element(i as usize, j as usize, 1);
+                    self.board.set_element(i as usize, j as usize, current_shape);
                     new_points.push((i as usize, j as usize));
                 }
                 n += 1;
@@ -538,13 +554,13 @@ impl Tetris
     {
         match self.current_shape
         {
-            Some(0) => (1.0, 1.0),
-            Some(1) => (0.0, 1.0),
+            Some(1) => (1.0, 1.0),
             Some(2) => (0.0, 1.0),
             Some(3) => (0.0, 1.0),
             Some(4) => (0.0, 1.0),
-            Some(5) => (0.5, 0.5),
-            Some(6) => (1.5, 1.5),
+            Some(5) => (0.0, 1.0),
+            Some(6) => (0.5, 0.5),
+            Some(7) => (1.5, 1.5),
             _ => panic!(),
         }
     }
@@ -568,7 +584,7 @@ impl Tetris
         {
             for j in 0..10
             {
-                if *self.board.get_element(i, j) == 1
+                if *self.board.get_element(i, j) > 0
                 {
                     return (i, j);
                 }
@@ -585,6 +601,22 @@ impl Tetris
             for j in 0..10
             {
                 if *self.board.get_element(i, j) == value
+                {
+                    points.push((i, j));
+                }
+            }
+        }
+        points
+    }
+
+    fn all_non_zero_points(&self) -> Vec<(usize, usize)>
+    {
+        let mut points = vec![];
+        for i in 0..22
+        {
+            for j in 0..10
+            {
+                if *self.board.get_element(i, j) > 0
                 {
                     points.push((i, j));
                 }
@@ -615,26 +647,27 @@ impl Tetris
         // let mut points = vec![];
         // self.flood_fill(point, &points);
 
-        // let mut points = self.all_points_equal_to(1);
+        let mut points = self.all_non_zero_points();
+        self.hard_drop(&points);
         // while let Ok(result) = self.move_to(&mut points, 'D')
         // {
         //     points = result;
         // }
 
-        for i in 0..=9
-        {
-            for j in (0..21).rev()
-            {
-                if *self.board.get_element(j, i) == 1
-                {
-                    let mut points = vec![(j, i)];
-                    while let Ok(p) = self.move_to(&mut points, 'D')
-                    {
-                        points = p;
-                    }
-                }
-            }
-        }
+        // for i in 0..=9
+        // {
+        //     for j in (0..21).rev()
+        //     {
+        //         if *self.board.get_element(j, i) > 0
+        //         {
+        //             let mut points = vec![(j, i)];
+        //             while let Ok(p) = self.move_to(&mut points, 'D')
+        //             {
+        //                 points = p;
+        //             }
+        //         }
+        //     }
+        // }
         // self.score(filled_lines.len());
     }
 }

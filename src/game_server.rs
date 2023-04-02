@@ -19,7 +19,7 @@ async fn game_server(
                 let mut dg_clone = kill_games.subscribe();
                 let cge_clone = confirm_game_end.clone();
                 let mut players = vec![];
-                for _ in 0..2
+                for _ in 0..3
                 {
                     let (stream, _) = listener.accept().await.unwrap();
                     let ws_stream = tokio_tungstenite::accept_async(stream)
