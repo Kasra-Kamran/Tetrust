@@ -1,6 +1,8 @@
 mod webtetris;
+mod comms;
 use webtetris::WebTetris;
 use tokio::{sync::{broadcast, mpsc}, net::{TcpListener, TcpStream}};
+use comms::Comms;
 
 async fn game_server(
     mut die: broadcast::Receiver<bool>,
@@ -40,13 +42,19 @@ pub async fn game_server_controller()
     let (kill_game, mut die) = broadcast::channel::<bool>(1);
     let (kill_confirm, mut kc_r) = mpsc::channel::<bool>(1);
     tokio::spawn(game_server(die, kill_confirm));
-    kc_r.recv().await;
 
     // control the game_server with a remote connection
-    // and all that fancy stuff BUT for later.
-    /* let listener = TcpListener::bind("0.0.0.0:8000");
-    loop
-    {
-        let (stream, _) = listener.accept().await.unwrap();
-    } */
+    // and all that fancy stuff.
+
+    let mut comms = Comms::new();
+    comms.connect_to("127.0.0.1:8585").await;
+    comms.send(String::from("hello there, ladies and gentlemen!")).await.unwrap();
+    let mut s: String = comms.receive().await.unwrap();
+    println!("{}", s);
+    comms.send(String::from("well, hello there, fellow children!")).await.unwrap();
+    s = comms.receive().await.unwrap();
+    println!("{}", s);
+
+
+    kc_r.recv().await;
 }
