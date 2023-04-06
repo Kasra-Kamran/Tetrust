@@ -67,3 +67,28 @@ pub async fn game_server_controller()
 
     kc_r.recv().await;
 }
+
+/*
+    websocket connection
+    receive username and credentials
+    communicate with django and authenticate
+    if authenticated add to list_of_ws
+    ------------------------------------
+    # we need to actively listen on all websockets to see who wants to-
+      queue a game.
+
+    if anyone sends a message saying they want to play, we add them to-
+     a queue of players who want to play(only their usernames, their websocket-
+     connections should will go in list_of_ws).
+
+    # the items of the queue are probably gonna be structs holding both the-
+      players' usernames and the number of players they want to play with.
+
+    another task manages the aforementioned queue and if there are enough people-
+     it starts a game.
+
+    the games end, and if the players hadn't disconnected,
+     we add the websockets to list_of_ws, and restart the task that was
+     listening on the websockets to wait for the players to either disconnect-
+     or decide to join a game.
+*/

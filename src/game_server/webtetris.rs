@@ -79,6 +79,10 @@ impl WebTetris
                 player_id: id,
             };
 
+            let list_of_ws_clone = list_of_ws.clone();
+            let (ws_sender, ws_receiver) = 
+                unbounded::<SplitSink<WebSocketStream<TcpStream>, Message>>();
+
             let (kill_webtetris, mut kw_r) = broadcast::channel::<bool>(1);
             let (kill_confirm, mut kc_r) = mpsc::channel(1);
 
@@ -96,15 +100,9 @@ impl WebTetris
                 outgoings_clone
             );
 
-            let list_of_ws_clone = list_of_ws.clone();
-            let (ws_sender, ws_receiver) = 
-                unbounded::<SplitSink<WebSocketStream<TcpStream>, Message>>();
-
-            let kw_r_hi = kill_webtetris.subscribe();
             let kill_confirm_hi = kill_confirm.clone();
             let command_tx_hi = command_tx.clone();
             let handle_incoming = WebTetris::handle_incoming(
-                kw_r_hi,
                 kill_confirm_hi,
                 command_tx_hi,
                 ws_incoming,
@@ -323,30 +321,37 @@ impl WebTetris
     }
 
     async fn handle_incoming(
-        mut die: broadcast::Receiver<bool>,
         confirm_die: mpsc::Sender<bool>,
         command_channel: async_channel::Sender<Command>,
         mut ws_incoming: SplitStream<WebSocketStream<TcpStream>>,
         ws_receiver: async_channel::Receiver<SplitSink<WebSocketStream<TcpStream>, Message>>,
         list_of_ws: Arc<Mutex<HashMap<String, WebSocketStream<TcpStream>>>>,)
     {
-        loop
+        tokio::select!
         {
-            if !die.is_empty()
+            ws_outgoing = ws_receiver.recv() =>
             {
-                break;
+                let ws_outgoing = ws_outgoing.unwrap();
+                reunite_ws_stream(ws_incoming, ws_outgoing, list_of_ws);
             }
-            if let Some(msg) = ws_incoming.try_next().await.unwrap()
+            _ = async
             {
-                if let Some(command) = WebTetris::get_command(msg.to_string().trim().to_string())
+                loop
                 {
-                    command_channel.try_send(command);
+                    if let Some(msg) = ws_incoming.try_next().await.unwrap()
+                    {
+                        if let Some(command) = WebTetris::get_command(msg.to_string().trim().to_string())
+                        {
+                            command_channel.try_send(command);
+                        }
+                    }
+                    else
+                    {
+                        return;
+                    }
                 }
-            }
+            } => {}
         }
-        let ws_outgoing = ws_receiver.recv().await.unwrap();
-        reunite_ws_stream(ws_incoming, ws_outgoing, list_of_ws);
-        command_channel.try_send(Command::End);
     }
 
     async fn tetris_to_ws(
@@ -359,10 +364,12 @@ impl WebTetris
     {
         tokio::select!
         {
-            _ = die.recv() => {}
+            _ = die.recv() =>
+            {
+                ws_sender.send(ws_outgoing).await;
+            }
             _ = channel_receive_end.map(Ok).forward(&mut ws_outgoing) => {}
         };
-        ws_sender.send(ws_outgoing).await;
         kill_on_disconnect.try_send(Command::End);
     }
 
@@ -389,4 +396,5 @@ fn reunite_ws_stream(
     let ws_stream = ws_incoming.reunite(ws_outgoing).unwrap();
     let mut list_of_ws = list_of_ws.lock().unwrap();
     list_of_ws.insert(String::from("kasra"), ws_stream);
+    println!("{:?}", list_of_ws);
 }
