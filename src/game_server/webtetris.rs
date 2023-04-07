@@ -26,11 +26,13 @@ pub struct WebTetris
 }
 
 #[derive(Serialize, Debug)]
-pub enum Game_Status
+pub enum GameStatus
 {
     Lost,
     Won,
     Ongoing,
+    Ended,
+    Start,
 }
 
 #[derive(Serialize, Debug)]
@@ -38,7 +40,7 @@ pub struct Data
 {
     player_id: i16,
     board: Vec<Vec<u8>>,
-    status: Game_Status,
+    status: GameStatus,
     piece: Vec<(usize, usize)>,
     piece_number: u8,
 }
@@ -48,8 +50,8 @@ impl WebTetris
     pub async fn new(
         mut die: broadcast::Receiver<bool>,
         confirm_death: mpsc::Sender<bool>,
-        ws_streams: Vec<WebSocketStream<TcpStream>>,
-        list_of_ws: Arc<Mutex<HashMap<String, WebSocketStream<TcpStream>>>>)
+        ws_streams: Vec<(String, WebSocketStream<TcpStream>)>,
+        game_end_sender: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>)>>)
     {
         let range = Uniform::from(0..1000);
         let (confirm_death, mut kc_main) = mpsc::channel(1);
@@ -63,7 +65,7 @@ impl WebTetris
             forward_list.push(player_outgoing);
         }
 
-        for (_, ws_stream) in ws_streams.into_iter().enumerate()
+        for (_, (username, ws_stream)) in ws_streams.into_iter().enumerate()
         {
             let (ws_outgoing, ws_incoming) = ws_stream.split();
             
@@ -79,7 +81,6 @@ impl WebTetris
                 player_id: id,
             };
 
-            let list_of_ws_clone = list_of_ws.clone();
             let (ws_sender, ws_receiver) = 
                 unbounded::<SplitSink<WebSocketStream<TcpStream>, Message>>();
 
@@ -100,6 +101,7 @@ impl WebTetris
                 outgoings_clone
             );
 
+            let game_end_sender_clone = game_end_sender.clone();
             let kill_confirm_hi = kill_confirm.clone();
             let command_tx_hi = command_tx.clone();
             let handle_incoming = WebTetris::handle_incoming(
@@ -107,7 +109,8 @@ impl WebTetris
                 command_tx_hi,
                 ws_incoming,
                 ws_receiver,
-                list_of_ws_clone,
+                username,
+                game_end_sender_clone,
             );
 
             let kill_confirm_ttw = kill_confirm.clone();
@@ -157,6 +160,32 @@ impl WebTetris
         let mut augh: bool = false;
         webtetris.tetris.current_piece = Some(webtetris.tetris.insert_random_shape());
         let mut i: i16 = 0;
+
+        let mut pn: u8 = 0;
+        if let Some(n) = webtetris.tetris.current_shape
+        {
+            pn = n;
+        }
+        let mut current_piece = vec![];
+        if let Some(piece) = webtetris.tetris.current_piece.clone()
+        {
+            current_piece = piece;
+        }
+        let data = Data
+        {
+            player_id: webtetris.player_id,
+            board: webtetris.tetris.board.get_matrix(),
+            status: GameStatus::Start,
+            piece: current_piece,
+            piece_number: pn,
+        };
+        let m = Message::binary(serde_json::to_string(&data).unwrap());
+        for (_, receiver) in state_receivers.iter().enumerate()
+        {
+            let m2 = m.clone();
+            receiver.unbounded_send(m2);
+        }
+
         loop
         {
             let mut current_piece = vec![];
@@ -197,7 +226,7 @@ impl WebTetris
                             {
                                 player_id: webtetris.player_id,
                                 board: webtetris.tetris.board.get_matrix(),
-                                status: Game_Status::Lost,
+                                status: GameStatus::Lost,
                                 piece: current_piece,
                                 piece_number: pn,
                             };
@@ -260,7 +289,7 @@ impl WebTetris
                                     {
                                         player_id: webtetris.player_id,
                                         board: webtetris.tetris.board.get_matrix(),
-                                        status: Game_Status::Lost,
+                                        status: GameStatus::Lost,
                                         piece: current_piece,
                                         piece_number: pn,
                                     };
@@ -295,7 +324,7 @@ impl WebTetris
                     {
                         player_id: webtetris.player_id,
                         board: webtetris.tetris.board.get_matrix(),
-                        status: Game_Status::Ongoing,
+                        status: GameStatus::Ongoing,
                         piece: current_piece,
                         piece_number: pn,
                     };
@@ -312,6 +341,20 @@ impl WebTetris
                 },
                 Command::End =>
                 {
+                    let data = Data
+                    {
+                        player_id: webtetris.player_id,
+                        board: webtetris.tetris.board.get_matrix(),
+                        status: GameStatus::Ended,
+                        piece: current_piece,
+                        piece_number: 0,
+                    };
+                    let m = Message::binary(serde_json::to_string(&data).unwrap());
+                    for (_, receiver) in state_receivers.iter().enumerate()
+                    {
+                        let m2 = m.clone();
+                        receiver.unbounded_send(m2);
+                    }
                     kill_coroutines.send(true);
                     confirm_kill.recv().await;
                     break;
@@ -325,14 +368,28 @@ impl WebTetris
         command_channel: async_channel::Sender<Command>,
         mut ws_incoming: SplitStream<WebSocketStream<TcpStream>>,
         ws_receiver: async_channel::Receiver<SplitSink<WebSocketStream<TcpStream>, Message>>,
-        list_of_ws: Arc<Mutex<HashMap<String, WebSocketStream<TcpStream>>>>,)
+        username: String,
+        game_end_sender: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>)>>,)
     {
+        let game_end_sender_clone = game_end_sender.clone();
+        let username_clone = username.clone();
         tokio::select!
         {
             ws_outgoing = ws_receiver.recv() =>
             {
-                let ws_outgoing = ws_outgoing.unwrap();
-                reunite_ws_stream(ws_incoming, ws_outgoing, list_of_ws);
+                match ws_outgoing
+                {
+                    Err(_) =>
+                    {
+                        println!("fucked");
+                        game_end_sender.send(None).await;
+                    },
+                    Ok(ws_outgoing) =>
+                    {
+                        let ws_stream = ws_incoming.reunite(ws_outgoing).unwrap();
+                        game_end_sender.send(Some((username, ws_stream))).await;
+                    },
+                };
             }
             _ = async
             {
@@ -347,6 +404,7 @@ impl WebTetris
                     }
                     else
                     {
+                        game_end_sender_clone.send(None).await;
                         return;
                     }
                 }
@@ -386,15 +444,4 @@ impl WebTetris
             _ => None
         }
     }
-}
-
-fn reunite_ws_stream(
-    ws_incoming: SplitStream<WebSocketStream<TcpStream>>,
-    ws_outgoing: SplitSink<WebSocketStream<TcpStream>, Message>,
-    list_of_ws: Arc<Mutex<HashMap<String, WebSocketStream<TcpStream>>>>)
-{
-    let ws_stream = ws_incoming.reunite(ws_outgoing).unwrap();
-    let mut list_of_ws = list_of_ws.lock().unwrap();
-    list_of_ws.insert(String::from("kasra"), ws_stream);
-    println!("{:?}", list_of_ws);
 }
