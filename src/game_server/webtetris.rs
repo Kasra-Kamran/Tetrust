@@ -84,6 +84,8 @@ impl WebTetris
             let (ws_sender, ws_receiver) = 
                 unbounded::<SplitSink<WebSocketStream<TcpStream>, Message>>();
 
+            let (to_hiao, from_owner) = unbounded::<Message>();
+
             let (kill_webtetris, mut kw_r) = broadcast::channel::<bool>(1);
             let (kill_confirm, mut kc_r) = mpsc::channel(1);
 
@@ -98,20 +100,20 @@ impl WebTetris
                 event_tx,
                 kill_webtetris_owner,
                 kc_r,
-                outgoings_clone
-            );
+                to_hiao);
 
             let game_end_sender_clone = game_end_sender.clone();
-            let kill_confirm_hi = kill_confirm.clone();
-            let command_tx_hi = command_tx.clone();
-            let handle_incoming = WebTetris::handle_incoming(
-                kill_confirm_hi,
-                command_tx_hi,
+            let kill_confirm_hiao = kill_confirm.clone();
+            let command_tx_hiao = command_tx.clone();
+            let handle_incoming = WebTetris::handle_incoming_and_outgoing(
+                kill_confirm_hiao,
+                command_tx_hiao,
                 ws_incoming,
                 ws_receiver,
                 username,
                 game_end_sender_clone,
-            );
+                outgoings_clone,
+                from_owner);
 
             let kill_confirm_ttw = kill_confirm.clone();
             let kw_r_ttw = kill_webtetris.subscribe();
@@ -122,8 +124,7 @@ impl WebTetris
                 command_tx_ttw,
                 forward_list.remove(0),
                 ws_outgoing,
-                ws_sender,
-            );
+                ws_sender);
 
             let kill_webtetris_gm = kill_webtetris.clone();
             let kill_confirm_gm = kill_confirm.clone();
@@ -155,7 +156,7 @@ impl WebTetris
         event_channel: async_channel::Sender<Event>,
         kill_coroutines: broadcast::Sender<bool>,
         mut confirm_kill: mpsc::Receiver<bool>,
-        state_receivers: Vec<futures_channel::mpsc::UnboundedSender<Message>>)
+        to_hiao: async_channel::Sender<Message>)
     {
         webtetris.tetris.current_piece = Some(webtetris.tetris.insert_random_shape());
         let mut i: i16 = 0;
@@ -179,11 +180,7 @@ impl WebTetris
             piece_number: pn,
         };
         let m = Message::binary(serde_json::to_string(&data).unwrap());
-        for (_, receiver) in state_receivers.iter().enumerate()
-        {
-            let m2 = m.clone();
-            receiver.unbounded_send(m2);
-        }
+        to_hiao.try_send(m);
 
         loop
         {
@@ -201,7 +198,7 @@ impl WebTetris
 
             match msg
             {
-                Command::Hard_Drop =>
+                Command::HardDrop =>
                 {
                     let mut piece = vec![];
                     if let Some(p) = webtetris.tetris.current_piece.clone()
@@ -230,11 +227,7 @@ impl WebTetris
                                 piece_number: pn,
                             };
                             let m = Message::binary(serde_json::to_string(&data).unwrap());
-                            for (_, receiver) in state_receivers.iter().enumerate()
-                            {
-                                let m2 = m.clone();
-                                receiver.unbounded_send(m2);
-                            }
+                            to_hiao.try_send(m);
                             kill_coroutines.send(true);
                             confirm_kill.recv().await;
                             break;
@@ -293,11 +286,7 @@ impl WebTetris
                                         piece_number: pn,
                                     };
                                     let m = Message::binary(serde_json::to_string(&data).unwrap());
-                                    for (_, receiver) in state_receivers.iter().enumerate()
-                                    {
-                                        let m2 = m.clone();
-                                        receiver.unbounded_send(m2);
-                                    }
+                                    to_hiao.try_send(m);
                                     kill_coroutines.send(true);
                                     confirm_kill.recv().await;
                                     break;
@@ -328,11 +317,7 @@ impl WebTetris
                         piece_number: pn,
                     };
                     let m = Message::binary(serde_json::to_string(&data).unwrap());
-                    for (_, receiver) in state_receivers.iter().enumerate()
-                    {
-                        let m2 = m.clone();
-                        receiver.unbounded_send(m2);
-                    }
+                    to_hiao.try_send(m);
                 },
                 Command::ClearLines =>
                 {
@@ -349,11 +334,7 @@ impl WebTetris
                         piece_number: 0,
                     };
                     let m = Message::binary(serde_json::to_string(&data).unwrap());
-                    for (_, receiver) in state_receivers.iter().enumerate()
-                    {
-                        let m2 = m.clone();
-                        receiver.unbounded_send(m2);
-                    }
+                    to_hiao.try_send(m);
                     kill_coroutines.send(true);
                     confirm_kill.recv().await;
                     break;
@@ -362,13 +343,15 @@ impl WebTetris
         }
     }
 
-    async fn handle_incoming(
+    async fn handle_incoming_and_outgoing(
         confirm_die: mpsc::Sender<bool>,
         command_channel: async_channel::Sender<Command>,
         mut ws_incoming: SplitStream<WebSocketStream<TcpStream>>,
         ws_receiver: async_channel::Receiver<SplitSink<WebSocketStream<TcpStream>, Message>>,
         username: String,
-        game_end_sender: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>)>>,)
+        game_end_sender: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>)>>,
+        state_receivers: Vec<futures_channel::mpsc::UnboundedSender<Message>>,
+        from_owner: async_channel::Receiver<Message>,)
     {
         let game_end_sender_clone = game_end_sender.clone();
         tokio::select!
@@ -390,25 +373,42 @@ impl WebTetris
             }
             _ = async
             {
-                loop
+                'main: loop
                 {
-                    if let Ok(Some(msg)) = ws_incoming.try_next().await
+                    tokio::select!
                     {
-                        if let Some(command) = WebTetris::get_command(msg.to_string().trim().to_string())
+                        m = from_owner.recv() =>
                         {
-                            if command == Command::End
+                            if let Ok(m) = m
                             {
-                                command_channel.try_send(command);
-                                break;
+                                for (_, receiver) in state_receivers.iter().enumerate()
+                                {
+                                    let m2 = m.clone();
+                                    receiver.unbounded_send(m2);
+                                }
                             }
-                            command_channel.try_send(command);
                         }
-                    }
-                    else
-                    {
-                        game_end_sender_clone.send(None).await;
-                        return;
-                    }
+                        message = ws_incoming.try_next() =>
+                        {
+                            if let Ok(Some(msg)) = message
+                            {
+                                if let Some(command) = WebTetris::get_command(msg.to_string().trim().to_string())
+                                {
+                                    if command == Command::End
+                                    {
+                                        command_channel.try_send(command);
+                                        break 'main;
+                                    }
+                                    command_channel.try_send(command);
+                                }
+                            }
+                            else
+                            {
+                                game_end_sender_clone.send(None).await;
+                                return;
+                            }
+                        }
+                    };
                 }
                 let pending = future::pending::<()>();
                 pending.await;
@@ -444,7 +444,7 @@ impl WebTetris
             "move_right" => Some(Command::Move('R')),
             "move_left" => Some(Command::Move('L')),
             "end_game" => Some(Command::End),
-            "hard_drop" => Some(Command::Hard_Drop),
+            "hard_drop" => Some(Command::HardDrop),
             _ => None
         }
     }

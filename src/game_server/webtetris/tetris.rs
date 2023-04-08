@@ -24,7 +24,7 @@ pub enum Command
     Refresh,
     ClearLines,
     End,
-    Hard_Drop,
+    HardDrop,
 }
 
 pub enum Event
