@@ -43,6 +43,7 @@ pub struct Data
     status: GameStatus,
     piece: Vec<(usize, usize)>,
     piece_number: u8,
+    opponent: bool,
 }
 
 impl WebTetris
@@ -65,7 +66,7 @@ impl WebTetris
             forward_list.push(player_outgoing);
         }
 
-        for (_, (username, ws_stream)) in ws_streams.into_iter().enumerate()
+        for (i, (username, ws_stream)) in ws_streams.into_iter().enumerate()
         {
             let (ws_outgoing, ws_incoming) = ws_stream.split();
             
@@ -84,7 +85,7 @@ impl WebTetris
             let (ws_sender, ws_receiver) = 
                 unbounded::<SplitSink<WebSocketStream<TcpStream>, Message>>();
 
-            let (to_hiao, from_owner) = unbounded::<Message>();
+            let (to_hiao, from_owner) = unbounded::<Data>();
 
             let (kill_webtetris, mut kw_r) = broadcast::channel::<bool>(1);
             let (kill_confirm, mut kc_r) = mpsc::channel(1);
@@ -100,7 +101,7 @@ impl WebTetris
                 event_tx,
                 kill_webtetris_owner,
                 kc_r,
-                to_hiao);
+                to_hiao,);
 
             let game_end_sender_clone = game_end_sender.clone();
             let kill_confirm_hiao = kill_confirm.clone();
@@ -113,7 +114,8 @@ impl WebTetris
                 username,
                 game_end_sender_clone,
                 outgoings_clone,
-                from_owner);
+                from_owner,
+                i,);
 
             let kill_confirm_ttw = kill_confirm.clone();
             let kw_r_ttw = kill_webtetris.subscribe();
@@ -156,7 +158,7 @@ impl WebTetris
         event_channel: async_channel::Sender<Event>,
         kill_coroutines: broadcast::Sender<bool>,
         mut confirm_kill: mpsc::Receiver<bool>,
-        to_hiao: async_channel::Sender<Message>)
+        to_hiao: async_channel::Sender<Data>,)
     {
         webtetris.tetris.current_piece = Some(webtetris.tetris.insert_random_shape());
         let mut i: i16 = 0;
@@ -178,8 +180,9 @@ impl WebTetris
             status: GameStatus::Start,
             piece: current_piece,
             piece_number: pn,
+            opponent: true,
         };
-        let m = Message::binary(serde_json::to_string(&data).unwrap());
+        let m = data;
         to_hiao.try_send(m);
 
         loop
@@ -225,8 +228,9 @@ impl WebTetris
                                 status: GameStatus::Lost,
                                 piece: current_piece,
                                 piece_number: pn,
+                                opponent: true,
                             };
-                            let m = Message::binary(serde_json::to_string(&data).unwrap());
+                            let m = data;
                             to_hiao.try_send(m);
                             kill_coroutines.send(true);
                             confirm_kill.recv().await;
@@ -284,8 +288,9 @@ impl WebTetris
                                         status: GameStatus::Lost,
                                         piece: current_piece,
                                         piece_number: pn,
+                                        opponent: true,
                                     };
-                                    let m = Message::binary(serde_json::to_string(&data).unwrap());
+                                    let m = data;
                                     to_hiao.try_send(m);
                                     kill_coroutines.send(true);
                                     confirm_kill.recv().await;
@@ -315,8 +320,9 @@ impl WebTetris
                         status: GameStatus::Ongoing,
                         piece: current_piece,
                         piece_number: pn,
+                        opponent: true,
                     };
-                    let m = Message::binary(serde_json::to_string(&data).unwrap());
+                    let m = data;
                     to_hiao.try_send(m);
                 },
                 Command::ClearLines =>
@@ -332,8 +338,9 @@ impl WebTetris
                         status: GameStatus::Ended,
                         piece: current_piece,
                         piece_number: 0,
+                        opponent: true,
                     };
-                    let m = Message::binary(serde_json::to_string(&data).unwrap());
+                    let m = data;
                     to_hiao.try_send(m);
                     kill_coroutines.send(true);
                     confirm_kill.recv().await;
@@ -351,7 +358,8 @@ impl WebTetris
         username: String,
         game_end_sender: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>)>>,
         state_receivers: Vec<futures_channel::mpsc::UnboundedSender<Message>>,
-        from_owner: async_channel::Receiver<Message>,)
+        from_owner: async_channel::Receiver<Data>,
+        self_index: usize,)
     {
         let game_end_sender_clone = game_end_sender.clone();
         tokio::select!
@@ -379,11 +387,17 @@ impl WebTetris
                     {
                         m = from_owner.recv() =>
                         {
-                            if let Ok(m) = m
+                            if let Ok(mut data) = m
                             {
-                                for (_, receiver) in state_receivers.iter().enumerate()
+                                let m = Message::binary(serde_json::to_string(&data).unwrap());
+                                for (i, receiver) in state_receivers.iter().enumerate()
                                 {
-                                    let m2 = m.clone();
+                                    let mut m2 = m.clone();
+                                    if i == self_index
+                                    {
+                                        data.opponent = false;
+                                        m2 = Message::binary(serde_json::to_string(&data).unwrap());
+                                    }
                                     receiver.unbounded_send(m2);
                                 }
                             }
