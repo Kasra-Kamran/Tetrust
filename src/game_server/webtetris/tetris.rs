@@ -15,6 +15,7 @@ pub const N2: [[u8; 3]; 2] = [[0, 1, 1], [1, 1, 0]];
 pub const S: [[u8; 2]; 2] = [[1, 1], [1, 1]];
 pub const L: [[u8; 4]; 1] = [[1, 1, 1, 1,]];
 
+#[derive(PartialEq)]
 pub enum Command
 {
     Move(char),

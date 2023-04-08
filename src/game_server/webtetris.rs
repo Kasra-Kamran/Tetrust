@@ -157,7 +157,6 @@ impl WebTetris
         mut confirm_kill: mpsc::Receiver<bool>,
         state_receivers: Vec<futures_channel::mpsc::UnboundedSender<Message>>)
     {
-        let mut augh: bool = false;
         webtetris.tetris.current_piece = Some(webtetris.tetris.insert_random_shape());
         let mut i: i16 = 0;
 
@@ -372,7 +371,6 @@ impl WebTetris
         game_end_sender: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>)>>,)
     {
         let game_end_sender_clone = game_end_sender.clone();
-        let username_clone = username.clone();
         tokio::select!
         {
             ws_outgoing = ws_receiver.recv() =>
@@ -381,7 +379,6 @@ impl WebTetris
                 {
                     Err(_) =>
                     {
-                        println!("fucked");
                         game_end_sender.send(None).await;
                     },
                     Ok(ws_outgoing) =>
@@ -395,10 +392,15 @@ impl WebTetris
             {
                 loop
                 {
-                    if let Some(msg) = ws_incoming.try_next().await.unwrap()
+                    if let Ok(Some(msg)) = ws_incoming.try_next().await
                     {
                         if let Some(command) = WebTetris::get_command(msg.to_string().trim().to_string())
                         {
+                            if command == Command::End
+                            {
+                                command_channel.try_send(command);
+                                break;
+                            }
                             command_channel.try_send(command);
                         }
                     }
@@ -408,6 +410,8 @@ impl WebTetris
                         return;
                     }
                 }
+                let pending = future::pending::<()>();
+                pending.await;
             } => {}
         }
     }

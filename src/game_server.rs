@@ -289,7 +289,7 @@ fn join_game(
         }
         for _ in 0..capacity
         {
-            if let Some((username, ws_stream)) = receiver.recv().await.unwrap()
+            if let Some(Some((username, ws_stream))) = receiver.recv().await
             {
                 let cd = ConnectionData
                 {
@@ -319,7 +319,6 @@ async fn listen_on_ws(ws_stream: WebSocketStream<TcpStream>) -> Result<(WebSocke
     {   
         if let Some(msg) = ws_incoming.try_next().await.unwrap()
         {
-            println!("{}", msg.to_string());
             let msg = msg.to_string();
             if let Ok(user_msg) = serde_json::from_str(&msg)
             {
@@ -341,7 +340,6 @@ async fn authenticate(mut ws_stream: WebSocketStream<TcpStream>) -> Result<(Stri
     let user: User;
     if let Some(msg) = ws_incoming.try_next().await.unwrap()
     {
-        println!("{}", msg.to_string());
         user = serde_json::from_str(&msg.to_string()).unwrap();
         let mut comms: Comms = Comms::new();
         comms.connect_to("127.0.0.1:8585").await;
