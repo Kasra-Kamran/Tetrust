@@ -15,10 +15,6 @@ use rand::thread_rng;
 use std::fmt::Debug;
 use serde::{Serialize, Deserialize};
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
-
 pub struct WebTetris
 {
     pub tetris: Tetris,
