@@ -626,30 +626,18 @@ impl Tetris
         points
     }
 
-    fn all_non_zero_points_above_line(&self, line: usize) -> Vec<(usize, usize)>
+    fn line(l: usize) -> Vec<(usize, usize)>
     {
         let mut points = vec![];
-        for i in 0..line.checked_sub(1).unwrap_or_default()
+        for i in 0..10
         {
-            for j in 0..10
-            {
-                if *self.board.get_element(i, j) > 0
-                {
-                    points.push((i, j));
-                }
-            }
+            points.push((l, i));
         }
         points
     }
 
-    // this function doesn't work the way it should.
-    // will fix later.
     pub fn clear_lines(&mut self)
     {
-        // this function is bugged, it does not account for
-        // seperated chunks, at least with the flood_fill version.
-        // it is possible to implement this function more
-        // efficiently, and also avoid that bug.
         let filled_lines = self.check_filled_lines();
         if filled_lines.len() == 0
         {
@@ -660,19 +648,12 @@ impl Tetris
             self.set_line_to(*line, 0);
         }
 
-        /* let point = self.some_point();
         let mut points = vec![];
-        self.flood_fill(point, &points); */
-
-        let points = self.all_non_zero_points();
-        self.hard_drop(&points);
-
-        // for i in (0..=23).rev()
-        // {
-        //     println!("{}", i);
-        //     let mut points = self.all_non_zero_points_above_line(i);
-        //     self.hard_drop(&points);
-        // }
+        for i in (0..22).rev()
+        {
+            points = Self::line(i);
+            self.hard_drop(&points);
+        }
 
         // self.score(filled_lines.len());
     }

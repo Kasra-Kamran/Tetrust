@@ -98,13 +98,6 @@ async fn game_server(
     let (confirm_game_end, mut kc_r) = mpsc::channel::<bool>(1);
     let (kill_games, mut die_games) = broadcast::channel::<bool>(1);
     let gamerooms: Arc<Mutex<Vec<GameRoom>>> = Arc::new(Mutex::new(Vec::new()));
-    ////
-    // fix the gameroom shit. this won't cut it.
-    {
-        let mut grs = gamerooms.lock().await;
-        create_gameroom(3, &mut grs).await;
-    }
-    ////
     let listener = TcpListener::bind("0.0.0.0:12345").await.unwrap();
     tokio::select!
     {
