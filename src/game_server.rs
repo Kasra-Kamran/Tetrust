@@ -7,7 +7,6 @@ use tokio_tungstenite::WebSocketStream;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
 use futures_util::{StreamExt, TryStreamExt, future::{self, Ready, BoxFuture, FutureExt}, SinkExt};
 use serde::Deserialize;
 use rand::{distributions::{Distribution, Uniform}, thread_rng};
@@ -56,7 +55,7 @@ struct WebTetrisData
     kill_games: Option<broadcast::Sender<bool>>,
 }
 
-async fn game_server(
+async fn game_server_basic(
     mut die: broadcast::Receiver<bool>,
     confirm_die: mpsc::Sender<bool>)
 {   
@@ -92,63 +91,65 @@ async fn game_server(
     kc_r.recv().await;
 }
 
-pub async fn game_server_controller()
+async fn game_server(
+    mut die: broadcast::Receiver<bool>,
+    confirm_die: mpsc::Sender<bool>)
 {
-    // let (kill_game, mut die) = broadcast::channel::<bool>(1);
-    // let (kill_confirm, mut kc_r) = mpsc::channel::<bool>(1);
-    // tokio::spawn(game_server(die, kill_confirm));
-
-    // control the game_server with a remote connection
-    // and all that fancy stuff.
-
-    // let mut comms = Comms::new();
-    // comms.connect_to("127.0.0.1:8585").await;
-    // comms.send(String::from("{\"command\":\"insert\", \"data\":\"message from rust!\", \"id\":85}")).await.unwrap();
-    // let mut s: String = comms.receive().await.unwrap();
-    // println!("{}", s);
-    // comms.send(String::from("{\"command\":\"get\", \"id\":85}")).await.unwrap();
-    // s = comms.receive().await.unwrap();
-    // println!("{}", s);
-
-    /////////////////////////////////
     let (confirm_game_end, mut kc_r) = mpsc::channel::<bool>(1);
     let (kill_games, mut die_games) = broadcast::channel::<bool>(1);
     let gamerooms: Arc<Mutex<Vec<GameRoom>>> = Arc::new(Mutex::new(Vec::new()));
-    ///////////////////////
+    ////
+    // fix the gameroom shit. this won't cut it.
     let grs = gamerooms.clone();
     create_gameroom(3, grs).await;
-    ///////////////////////
+    ////
     let listener = TcpListener::bind("127.0.0.1:12345").await.unwrap();
-    loop
+    tokio::select!
     {
-        let mut dg_clone = kill_games.subscribe();
-        let cge_clone = confirm_game_end.clone();
-        let gamerooms_clone = gamerooms.clone();
-        let kill_games_clone = kill_games.clone();
-
-        let webtetris_data = WebTetrisData
+        _ = die.recv() => {kill_games.send(true);}
+        _ = async
         {
-            dg: dg_clone,
-            cge: cge_clone,
-            kill_games: Some(kill_games_clone),
-        };
-
-        let (stream, _) = listener.accept().await.unwrap();
-        let ws_stream = tokio_tungstenite::accept_async(stream)
-            .await
-            .unwrap();
-        let cd = ConnectionData
-        {
-            ws_stream,
-            username: None,
-        };
-        tokio::spawn(handle_connection(cd, gamerooms_clone, webtetris_data));
-    }
+            loop
+            {
+                let mut dg_clone = kill_games.subscribe();
+                let cge_clone = confirm_game_end.clone();
+                let gamerooms_clone = gamerooms.clone();
+                let kill_games_clone = kill_games.clone();
+        
+                let webtetris_data = WebTetrisData
+                {
+                    dg: dg_clone,
+                    cge: cge_clone,
+                    kill_games: Some(kill_games_clone),
+                };
+        
+                let (stream, _) = listener.accept().await.unwrap();
+                let ws_stream = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .unwrap();
+                let cd = ConnectionData
+                {
+                    ws_stream,
+                    username: None,
+                };
+                tokio::spawn(handle_connection(cd, gamerooms_clone, webtetris_data));
+            }
+        } => {}
+    };
     drop(confirm_game_end);
     kc_r.recv().await;
-    /////////////////////////////////
+}
 
-    // kc_r.recv().await;
+pub async fn game_server_controller()
+{
+    let (kill_game, mut die) = broadcast::channel::<bool>(1);
+    let (kill_confirm, mut kc_r) = mpsc::channel::<bool>(1);
+    tokio::spawn(game_server(die, kill_confirm));
+
+    // control the game_server with a remote connection
+    // and all that fancy stuff, BUT, for later.
+
+    kc_r.recv().await;
 }
 
 async fn handle_connection(
@@ -156,100 +157,69 @@ async fn handle_connection(
     gamerooms: Arc<Mutex<Vec<GameRoom>>>,
     webtetris_data: WebTetrisData)
 {
-    // figure out a way to make this DRY.
+    let ws_stream: WebSocketStream<TcpStream>;
+    let username: String;
     if let Some(u) = cd.username
     {
-        match listen_on_ws(cd.ws_stream).await
-        {
-            Err(_) => return,
-            Ok((ws_stream, user_msg)) =>
-            {
-                let cd = ConnectionData
-                {
-                    ws_stream,
-                    username: Some(u),
-                };
-                match user_msg.command.as_str()
-                {
-                    "join_game" => tokio::spawn(join_game(cd, user_msg, gamerooms, webtetris_data)),
-                    _ => todo!(),
-                };
-            },
-        };
+        username = u;
+        ws_stream = cd.ws_stream;
+    }
+    else if let Ok((u, ws)) = authenticate(cd.ws_stream).await
+    {
+        username = u;
+        ws_stream = ws;
     }
     else
     {
-        if let Ok((username, ws_stream)) = authenticate(cd.ws_stream).await
+        return;
+    }
+    match listen_on_ws(ws_stream).await
+    {
+        Err(_) => return,
+        Ok((ws_stream, user_msg)) =>
         {
-            match listen_on_ws(ws_stream).await
+            let cd = ConnectionData
             {
-                Err(_) => return,
-                Ok((ws_stream, user_msg)) =>
-                {
-                    let cd = ConnectionData
-                    {
-                        ws_stream,
-                        username: Some(username),
-                    };
-                    match user_msg.command.as_str()
-                    {
-                        "join_game" => tokio::spawn(join_game(cd, user_msg, gamerooms, webtetris_data)),
-                        _ => todo!(),
-                    };
-                },
+                ws_stream,
+                username: Some(username),
             };
-        }
-    }
+            tokio::spawn(perform_user_command(cd, user_msg, gamerooms, webtetris_data));
+        },
+    };
 }
 
-async fn create_gameroom(capacity: u8, gamerooms: Arc<Mutex<Vec<GameRoom>>>)
+async fn perform_user_command(
+    cd: ConnectionData,
+    user_msg: UserMessage,
+    gamerooms: Arc<Mutex<Vec<GameRoom>>>,
+    webtetris_data: WebTetrisData,)
 {
-    let id;
+    match user_msg.command.as_str()
     {
-        let range = Uniform::from(0..1000);
-        let mut rng = thread_rng();
-        id = range.sample(&mut rng);
-    }
-    let gameroom = GameRoom
-    {
-        status: GameRoomStatus::Inactive,
-        capacity: capacity,
-        players: vec![],
-        id,
+        "join_game" => tokio::spawn(join_game(cd, user_msg, gamerooms, webtetris_data)),
+        _ => todo!(),
     };
-    let mut gamerooms = gamerooms.lock().await;
-    (*gamerooms).push(gameroom);
 }
 
-async fn add_to_gameroom_or_start(mut gameroom: GameRoom, cd: ConnectionData, webtetris_data: WebTetrisData, sender: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>)>>) -> (GameRoom, bool)
+async fn listen_on_ws(ws_stream: WebSocketStream<TcpStream>) -> Result<(WebSocketStream<TcpStream>, UserMessage), ()>
 {
-    let new_gameroom = GameRoom
-    {
-        players: vec![],
-        capacity: gameroom.capacity,
-        status: GameRoomStatus::Inactive,
-        id: gameroom.id,
-    };
-    if let Some(username) = cd.username
-    {
-        gameroom.players.push((username, cd.ws_stream));
-    }
-    if gameroom.capacity == <usize as TryInto<u8>>::try_into(gameroom.players.len()).unwrap()
-    {
-        gameroom.players = send_to_all(gameroom.players, String::from("ready for game?")).await;
-        if gameroom.capacity != <usize as TryInto<u8>>::try_into(gameroom.players.len()).unwrap()
+    let (mut ws_outgoing, mut ws_incoming) = ws_stream.split();
+    loop
+    {   
+        if let Some(msg) = ws_incoming.try_next().await.unwrap()
         {
-            return (gameroom, false);
+            let msg = msg.to_string();
+            if let Ok(user_msg) = serde_json::from_str(&msg)
+            {
+                let ws_stream = ws_incoming.reunite(ws_outgoing).unwrap();
+                return Ok((ws_stream, user_msg));
+            }
         }
-        gameroom.players = receive_from_all(gameroom.players, String::from("ready!")).await;
-        if gameroom.capacity != <usize as TryInto<u8>>::try_into(gameroom.players.len()).unwrap()
+        else
         {
-            return (gameroom, false);
+            return Err(());
         }
-        tokio::spawn(start_game(gameroom, webtetris_data, sender));
-        return (new_gameroom, true);
     }
-    return (gameroom, false);
 }
 
 async fn send_to_all(players: Vec<(String, WebSocketStream<TcpStream>)>, msg: String) -> Vec<(String, WebSocketStream<TcpStream>)>
@@ -320,13 +290,29 @@ async fn receive_from_all(players: Vec<(String, WebSocketStream<TcpStream>)>, ms
     players2
 }
 
-async fn start_game(mut gameroom: GameRoom, webtetris_data: WebTetrisData, sender: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>)>>)
+async fn authenticate(mut ws_stream: WebSocketStream<TcpStream>) -> Result<(String, WebSocketStream<TcpStream>), ()>
 {
-    tokio::spawn(WebTetris::new(
-        webtetris_data.dg,
-        webtetris_data.cge,
-        gameroom.players,
-        sender));
+    let (mut ws_outgoing, mut ws_incoming) = ws_stream.split();
+    let s: String;
+    let user: User;
+    if let Ok(Some(msg)) = ws_incoming.try_next().await
+    {
+        user = serde_json::from_str(&msg.to_string()).unwrap();
+        let mut comms: Comms = Comms::new();
+        comms.connect_to("127.0.0.1:8585").await;
+        comms.send(String::from(msg.to_string())).await.unwrap();
+        s = comms.receive().await.unwrap();
+    }
+    else
+    {
+        return Err(());
+    }
+    if s == "not_authentic"
+    {
+        return Err(());
+    }
+    ws_stream = ws_incoming.reunite(ws_outgoing).unwrap();
+    Ok((user.username, ws_stream))
 }
 
 fn join_game(
@@ -395,73 +381,61 @@ fn join_game(
     }.boxed()
 }
 
-async fn listen_on_ws(ws_stream: WebSocketStream<TcpStream>) -> Result<(WebSocketStream<TcpStream>, UserMessage), ()>
+async fn create_gameroom(capacity: u8, gamerooms: Arc<Mutex<Vec<GameRoom>>>)
 {
-    let (mut ws_outgoing, mut ws_incoming) = ws_stream.split();
-    loop
-    {   
-        if let Some(msg) = ws_incoming.try_next().await.unwrap()
-        {
-            let msg = msg.to_string();
-            if let Ok(user_msg) = serde_json::from_str(&msg)
-            {
-                let ws_stream = ws_incoming.reunite(ws_outgoing).unwrap();
-                return Ok((ws_stream, user_msg));
-            }
-        }
-        else
-        {
-            return Err(());
-        }
+    let id;
+    {
+        let range = Uniform::from(0..1000);
+        let mut rng = thread_rng();
+        id = range.sample(&mut rng);
     }
+    let gameroom = GameRoom
+    {
+        status: GameRoomStatus::Inactive,
+        capacity: capacity,
+        players: vec![],
+        id,
+    };
+    let mut gamerooms = gamerooms.lock().await;
+    (*gamerooms).push(gameroom);
 }
 
-async fn authenticate(mut ws_stream: WebSocketStream<TcpStream>) -> Result<(String, WebSocketStream<TcpStream>), ()>
+async fn add_to_gameroom_or_start(mut gameroom: GameRoom, cd: ConnectionData, webtetris_data: WebTetrisData, sender: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>)>>) -> (GameRoom, bool)
 {
-    let (mut ws_outgoing, mut ws_incoming) = ws_stream.split();
-    let s: String;
-    let user: User;
-    if let Ok(Some(msg)) = ws_incoming.try_next().await
+    let new_gameroom = GameRoom
     {
-        user = serde_json::from_str(&msg.to_string()).unwrap();
-        let mut comms: Comms = Comms::new();
-        comms.connect_to("127.0.0.1:8585").await;
-        comms.send(String::from(msg.to_string())).await.unwrap();
-        s = comms.receive().await.unwrap();
-    }
-    else
+        players: vec![],
+        capacity: gameroom.capacity,
+        status: GameRoomStatus::Inactive,
+        id: gameroom.id,
+    };
+    if let Some(username) = cd.username
     {
-        return Err(());
+        gameroom.players.push((username, cd.ws_stream));
     }
-    if s == "not_authentic"
+    if gameroom.capacity == <usize as TryInto<u8>>::try_into(gameroom.players.len()).unwrap()
     {
-        return Err(());
+        gameroom.players = send_to_all(gameroom.players, String::from("ready for game?")).await;
+        if gameroom.capacity != <usize as TryInto<u8>>::try_into(gameroom.players.len()).unwrap()
+        {
+            return (gameroom, false);
+        }
+        gameroom.players = receive_from_all(gameroom.players, String::from("ready!")).await;
+        if gameroom.capacity != <usize as TryInto<u8>>::try_into(gameroom.players.len()).unwrap()
+        {
+            return (gameroom, false);
+        }
+        tokio::spawn(start_game(gameroom, webtetris_data, sender));
+        return (new_gameroom, true);
     }
-    ws_stream = ws_incoming.reunite(ws_outgoing).unwrap();
-    Ok((user.username, ws_stream))
+    return (gameroom, false);
 }
 
-/*
-    websocket connection
-    receive username and credentials
-    communicate with django and authenticate
-    if authenticated add to list_of_ws
-    ------------------------------------
-    # we need to actively listen on all websockets to see who wants to-
-      queue a game.
-
-    if anyone sends a message saying they want to play, we add them to-
-     a queue of players who want to play(only their usernames, their websocket-
-     connections should will go in list_of_ws).
-
-    # the items of the queue are probably gonna be structs holding both the-
-      players' usernames and the number of players they want to play with.
-
-    another task manages the aforementioned queue and if there are enough people-
-     it starts a game.
-
-    the games end, and if the players hadn't disconnected,
-     we add the websockets to list_of_ws, and restart the task that was
-     listening on the websockets to wait for the players to either disconnect-
-     or decide to join a game.
-*/
+async fn start_game(mut gameroom: GameRoom, webtetris_data: WebTetrisData, sender: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>)>>)
+{
+    tokio::spawn(WebTetris::new(
+        webtetris_data.dg,
+        webtetris_data.cge,
+        gameroom.players,
+        sender));
+}
