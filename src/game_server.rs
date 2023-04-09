@@ -6,7 +6,7 @@ use comms::Comms;
 use tokio_tungstenite::WebSocketStream;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use futures_util::{StreamExt, TryStreamExt, future::{self, Ready, BoxFuture, FutureExt}, SinkExt};
 use serde::Deserialize;
 use rand::{distributions::{Distribution, Uniform}, thread_rng};
@@ -100,10 +100,12 @@ async fn game_server(
     let gamerooms: Arc<Mutex<Vec<GameRoom>>> = Arc::new(Mutex::new(Vec::new()));
     ////
     // fix the gameroom shit. this won't cut it.
-    let grs = gamerooms.clone();
-    create_gameroom(3, grs).await;
+    {
+        let mut grs = gamerooms.lock().await;
+        create_gameroom(3, &mut grs).await;
+    }
     ////
-    let listener = TcpListener::bind("127.0.0.1:12345").await.unwrap();
+    let listener = TcpListener::bind("0.0.0.0:12345").await.unwrap();
     tokio::select!
     {
         _ = die.recv() => {kill_games.send(true);}
@@ -339,15 +341,24 @@ fn join_game(
         {
             // what if there are no rooms with that many players?
             // you just gonna use room 0?!
+            // let grs = gamerooms.clone();
             let mut gamerooms = gamerooms.lock().await;
             let mut room_index = 0;
+            let mut selected = false;
+            // it doesn't work!
             for (i, gameroom) in gamerooms.iter().enumerate()
             {
                 if gameroom.capacity == capacity
                 {
                     room_index = i;
+                    selected = true;
                     break;
                 }
+            }
+            if !selected
+            {
+                room_index = gamerooms.len();
+                create_gameroom(capacity, &mut gamerooms).await;
             }
             let (gr, game_started) = add_to_gameroom_or_start(gamerooms.swap_remove(room_index), cd, wtd, sender).await;
             gamerooms.push(gr);
@@ -381,7 +392,7 @@ fn join_game(
     }.boxed()
 }
 
-async fn create_gameroom(capacity: u8, gamerooms: Arc<Mutex<Vec<GameRoom>>>)
+async fn create_gameroom<'a>(capacity: u8, gamerooms: &mut MutexGuard<'a, Vec<GameRoom>>)
 {
     let id;
     {
@@ -396,8 +407,7 @@ async fn create_gameroom(capacity: u8, gamerooms: Arc<Mutex<Vec<GameRoom>>>)
         players: vec![],
         id,
     };
-    let mut gamerooms = gamerooms.lock().await;
-    (*gamerooms).push(gameroom);
+    gamerooms.push(gameroom);
 }
 
 async fn add_to_gameroom_or_start(mut gameroom: GameRoom, cd: ConnectionData, webtetris_data: WebTetrisData, sender: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>)>>) -> (GameRoom, bool)
