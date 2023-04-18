@@ -1,5 +1,5 @@
 use std::fmt::{Display, Debug};
-use serde::{Serialize, Deserialize};
+use serde::Serialize;
 
 #[derive(Serialize, Debug)]
 pub struct Board<T>
@@ -35,14 +35,6 @@ impl<T: Copy + Display + Debug + Serialize> Board<T>
         self.board[i][j] = new_element;
     }
 
-    pub fn print_board(&self)
-    {
-        for i in &self.board
-        {
-            println!("{:?}", i);
-        }
-    }
-
     pub fn rotate_clockwise(&mut self)
     {
         let n = self.board.len();
@@ -61,10 +53,5 @@ impl<T: Copy + Display + Debug + Serialize> Board<T>
     pub fn get_matrix(&self) -> Vec<Vec<T>>
     {
         self.board.clone()
-    }
-
-    pub fn to_json(&self) -> String
-    {
-        serde_json::to_string(&self.board).unwrap()
     }
 }

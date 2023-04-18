@@ -1,19 +1,14 @@
 mod tetris;
 use tetris::Tetris;
-use tetris::Board;
-use tetris::Undroppable;
-use tokio_tungstenite::{accept_async, WebSocketStream};
-use tokio::{sync::{broadcast, mpsc}, time::sleep, net::{TcpListener, TcpStream}, task::JoinHandle};
-use tungstenite::{protocol::Message, error::Error};
-use tetris::Command;
-use tetris::Event;
-use futures_util::{future::{self, Ready}, pin_mut, StreamExt, TryStreamExt, stream::{SplitStream, SplitSink}};
-use async_channel::{unbounded, TryRecvError};
-use std::time::Duration;
-use rand::distributions::{Distribution, Uniform};
-use rand::thread_rng;
+use tetris::{Undroppable, Command, Event};
+use tokio_tungstenite::WebSocketStream;
+use tokio::{sync::{broadcast, mpsc}, net::TcpStream};
+use tungstenite::protocol::Message;
+use futures_util::{future::self, StreamExt, TryStreamExt, stream::{SplitStream, SplitSink}};
+use async_channel::{unbounded, bounded, Sender, Receiver};
+use rand::{distributions::{Distribution, Uniform}, thread_rng};
 use std::fmt::Debug;
-use serde::{Serialize, Deserialize};
+use serde::Serialize;
 
 pub struct WebTetris
 {
@@ -45,13 +40,13 @@ pub struct Data
 impl WebTetris
 {
     pub async fn new(
-        mut die: broadcast::Receiver<bool>,
-        confirm_death: mpsc::Sender<bool>,
+        die: broadcast::Receiver<bool>,
+        _confirm_death: mpsc::Sender<bool>,
         ws_streams: Vec<(String, WebSocketStream<TcpStream>)>,
-        game_end_sender: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>)>>)
+        game_end_notifier: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>, Option<u16>)>>)
     {
         let range = Uniform::from(0..1000);
-        let (confirm_death, mut kc_main) = mpsc::channel(1);
+        let (game_ended, mut game_ended_receiver) = mpsc::channel(1);
         let mut outgoings = vec![];
         let mut forward_list = vec![];
         
@@ -66,13 +61,13 @@ impl WebTetris
         {
             let (ws_outgoing, ws_incoming) = ws_stream.split();
             
-            let (command_tx, command_rx) = unbounded::<Command>();
-            let (event_tx, event_rx) = unbounded::<Event>();
+            let (command_transmitter, command_receiver) = unbounded::<Command>();
+            let (event_transmitter, event_receiver) = unbounded::<Event>();
             
             let mut rng = thread_rng();
             let id = range.sample(&mut rng);
 
-            let mut webtetris = WebTetris
+            let webtetris = WebTetris
             {
                 tetris: Tetris::new(),
                 player_id: id,
@@ -82,82 +77,84 @@ impl WebTetris
                 unbounded::<SplitSink<WebSocketStream<TcpStream>, Message>>();
 
             let (to_hiao, from_owner) = unbounded::<Data>();
+            let (score_sender, score_receiver) = bounded::<u16>(1);
 
-            let (kill_webtetris, mut kw_r) = broadcast::channel::<bool>(1);
-            let (kill_confirm, mut kc_r) = mpsc::channel(1);
+            let (kill_webtetris, _) = broadcast::channel::<bool>(1);
+            let (webtetris_ended, webtetris_ended_receiver) = mpsc::channel(1);
 
             let kill_webtetris_owner = kill_webtetris.clone();
-            let dead = confirm_death.clone();
+            let owner_ended = game_ended.clone();
 
             let outgoings_clone = outgoings.clone();
             let owner = WebTetris::owner(
-                dead,
+                owner_ended,
                 webtetris,
-                command_rx,
-                event_tx,
+                command_receiver,
+                event_transmitter,
                 kill_webtetris_owner,
-                kc_r,
-                to_hiao,);
+                webtetris_ended_receiver,
+                to_hiao,
+                score_sender,);
 
-            let game_end_sender_clone = game_end_sender.clone();
-            let kill_confirm_hiao = kill_confirm.clone();
-            let command_tx_hiao = command_tx.clone();
-            let handle_incoming = WebTetris::handle_incoming_and_outgoing(
-                kill_confirm_hiao,
-                command_tx_hiao,
+            let game_end_notifier_clone = game_end_notifier.clone();
+            let hiao_ended = webtetris_ended.clone();
+            let command_transmitter_hiao = command_transmitter.clone();
+            let handle_incoming_and_outgoing = WebTetris::handle_incoming_and_outgoing(
+                hiao_ended,
+                command_transmitter_hiao,
                 ws_incoming,
                 ws_receiver,
                 username,
-                game_end_sender_clone,
+                game_end_notifier_clone,
                 outgoings_clone,
                 from_owner,
-                i,);
+                i,
+                score_receiver);
 
-            let kill_confirm_ttw = kill_confirm.clone();
-            let kw_r_ttw = kill_webtetris.subscribe();
-            let command_tx_ttw = command_tx.clone();
+            let ttw_ended = webtetris_ended.clone();
+            let ttw_die = kill_webtetris.subscribe();
+            let command_transmitter_ttw = command_transmitter.clone();
             let tetris_to_ws = WebTetris::tetris_to_ws(
-                kw_r_ttw,
-                kill_confirm_ttw,
-                command_tx_ttw,
+                ttw_die,
+                ttw_ended,
+                command_transmitter_ttw,
                 forward_list.remove(0),
                 ws_outgoing,
                 ws_sender);
 
-            let kill_webtetris_gm = kill_webtetris.clone();
-            let kill_confirm_gm = kill_confirm.clone();
-            let command_tx_gm = command_tx.clone();
-            let event_rx_gm = event_rx.clone();
+            let start_die = kill_webtetris.clone();
+            let start_ended = webtetris_ended.clone();
+            let command_transmitter_gs = command_transmitter.clone();
             let game_start = Tetris::start(
-                kill_webtetris_gm,
-                kill_confirm_gm,
-                command_tx_gm,
-                event_rx_gm);
+                start_die,
+                start_ended,
+                command_transmitter_gs,
+                event_receiver);
 
             drop(kill_webtetris);
 
             tokio::spawn(game_start);
-            tokio::spawn(handle_incoming);
+            tokio::spawn(handle_incoming_and_outgoing);
             tokio::spawn(tetris_to_ws);
             tokio::spawn(owner);
         }
 
-        drop(confirm_death);
+        drop(game_ended);
 
-        kc_main.recv().await;
+        game_ended_receiver.recv().await;
     }
 
     async fn owner(
-        confirm_die: mpsc::Sender<bool>,
+        _owner_ended: mpsc::Sender<bool>,
         mut webtetris: WebTetris,
         command_channel: async_channel::Receiver<Command>,
         event_channel: async_channel::Sender<Event>,
         kill_coroutines: broadcast::Sender<bool>,
-        mut confirm_kill: mpsc::Receiver<bool>,
-        to_hiao: async_channel::Sender<Data>,)
+        mut coroutines_ended_receiver: mpsc::Receiver<bool>,
+        to_hiao: async_channel::Sender<Data>,
+        score_sender: Sender<u16>,)
     {
         webtetris.tetris.current_piece = Some(webtetris.tetris.insert_random_shape());
-        let mut i: i16 = 0;
 
         let mut pn: u8 = 0;
         if let Some(n) = webtetris.tetris.current_shape
@@ -188,7 +185,7 @@ impl WebTetris
             {
                 current_piece = piece;
             }
-            let mut msg = Command::Rotate;
+            let msg;
             if let Ok(m) = command_channel.recv().await
             {
                 msg = m;
@@ -228,8 +225,9 @@ impl WebTetris
                             };
                             let m = data;
                             to_hiao.try_send(m);
+                            score_sender.try_send(webtetris.tetris.score);
                             kill_coroutines.send(true);
-                            confirm_kill.recv().await;
+                            coroutines_ended_receiver.recv().await;
                             break;
                         },
                     };
@@ -263,14 +261,14 @@ impl WebTetris
                         {
                             match u
                             {
-                                Undroppable::Immovable(p) =>
+                                Undroppable::Immovable(_) =>
                                 {
                                     if c == 'D'
                                     {
                                         event_channel.try_send(Event::Undroppable);
                                     }
                                 },
-                                Undroppable::Lost(p) => 
+                                Undroppable::Lost(_) => 
                                 {
                                     let mut pn: u8 = 0;
                                     if let Some(n) = webtetris.tetris.current_shape
@@ -288,8 +286,9 @@ impl WebTetris
                                     };
                                     let m = data;
                                     to_hiao.try_send(m);
+                                    score_sender.try_send(webtetris.tetris.score);
                                     kill_coroutines.send(true);
-                                    confirm_kill.recv().await;
+                                    coroutines_ended_receiver.recv().await;
                                     break;
                                 },
                             };
@@ -298,8 +297,8 @@ impl WebTetris
                 },
                 Command::InsertPiece =>
                 {
-                    webtetris.tetris.clear_lines();
-                    let mut piece = webtetris.tetris.insert_random_shape();
+                    webtetris.tetris.score += webtetris.tetris.clear_lines();
+                    let piece = webtetris.tetris.insert_random_shape();
                     webtetris.tetris.current_piece = Some(piece);
                 },
                 Command::Refresh =>
@@ -323,7 +322,7 @@ impl WebTetris
                 },
                 Command::ClearLines =>
                 {
-                    webtetris.tetris.clear_lines();
+                    webtetris.tetris.score += webtetris.tetris.clear_lines();
                 },
                 Command::End =>
                 {
@@ -338,8 +337,9 @@ impl WebTetris
                     };
                     let m = data;
                     to_hiao.try_send(m);
+                    score_sender.try_send(webtetris.tetris.score);
                     kill_coroutines.send(true);
-                    confirm_kill.recv().await;
+                    coroutines_ended_receiver.recv().await;
                     break;
                 },
             };
@@ -347,17 +347,18 @@ impl WebTetris
     }
 
     async fn handle_incoming_and_outgoing(
-        confirm_die: mpsc::Sender<bool>,
+        _hiao_ended: mpsc::Sender<bool>,
         command_channel: async_channel::Sender<Command>,
         mut ws_incoming: SplitStream<WebSocketStream<TcpStream>>,
         ws_receiver: async_channel::Receiver<SplitSink<WebSocketStream<TcpStream>, Message>>,
         username: String,
-        game_end_sender: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>)>>,
+        game_end_notifier: mpsc::Sender<Option<(String, WebSocketStream<TcpStream>, Option<u16>)>>,
         state_receivers: Vec<futures_channel::mpsc::UnboundedSender<Message>>,
         from_owner: async_channel::Receiver<Data>,
-        self_index: usize,)
+        self_index: usize,
+        score_receiver: Receiver<u16>,)
     {
-        let game_end_sender_clone = game_end_sender.clone();
+        let game_end_notifier_clone = game_end_notifier.clone();
         tokio::select!
         {
             ws_outgoing = ws_receiver.recv() =>
@@ -366,12 +367,14 @@ impl WebTetris
                 {
                     Err(_) =>
                     {
-                        game_end_sender.send(None).await;
+                        game_end_notifier.send(None).await;
                     },
                     Ok(ws_outgoing) =>
                     {
+                        let s = score_receiver.recv().await.unwrap();
+                        let score = if s > 0 { Some(s) } else { None };
                         let ws_stream = ws_incoming.reunite(ws_outgoing).unwrap();
-                        game_end_sender.send(Some((username, ws_stream))).await;
+                        game_end_notifier.send(Some((username, ws_stream, score))).await;
                     },
                 };
             }
@@ -414,7 +417,7 @@ impl WebTetris
                             }
                             else
                             {
-                                game_end_sender_clone.send(None).await;
+                                game_end_notifier_clone.send(None).await;
                                 return;
                             }
                         }
@@ -428,7 +431,7 @@ impl WebTetris
 
     async fn tetris_to_ws(
         mut die: broadcast::Receiver<bool>,
-        confirm_die: mpsc::Sender<bool>,
+        _ttw_ended: mpsc::Sender<bool>,
         kill_on_disconnect: async_channel::Sender<Command>,
         channel_receive_end: futures_channel::mpsc::UnboundedReceiver<Message>,
         mut ws_outgoing: SplitSink<WebSocketStream<TcpStream>, Message>,

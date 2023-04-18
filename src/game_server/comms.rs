@@ -56,7 +56,7 @@ impl Comms
                 {
                     continue;
                 },
-                Err(e) =>
+                Err(_) =>
                 {
                     return Err(());
                 },
@@ -80,7 +80,7 @@ impl Comms
                 {
                     continue;
                 },
-                Err(e) =>
+                Err(_) =>
                 {
                     return Err(());
                 },
@@ -121,7 +121,7 @@ impl Comms
 				{
 					continue;
 				},
-				Err(e) =>
+				Err(_) =>
 				{
 					return Err(());
 				},
@@ -142,7 +142,7 @@ impl Comms
                     read += n;
                     if read == <u64 as TryInto<usize>>::try_into(size).unwrap()
                     {
-                        let s = match str::from_utf8(&buf)
+                        match str::from_utf8(&buf)
                         {
                             Ok(v) => return Ok(v.to_string()),
                             Err(_) => return Err(()),
@@ -153,7 +153,7 @@ impl Comms
 				{
 					continue;
 				},
-				Err(e) =>
+				Err(_) =>
 				{
 					return Err(());
 				},

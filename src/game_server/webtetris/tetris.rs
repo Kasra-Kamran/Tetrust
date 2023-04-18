@@ -2,10 +2,9 @@ mod board;
 pub use board::Board;
 use rand::distributions::{Distribution, Uniform};
 use rand::thread_rng;
-use tokio::{time::sleep, task::yield_now, sync::{broadcast, mpsc}};
+use tokio::{time::sleep, sync::{broadcast, mpsc}};
 use std::time::Duration;
 use async_channel::{Sender, Receiver};
-use futures_util::future;
 
 pub const T: [[u8; 3]; 2] = [[0, 1, 0], [1, 1, 1]];
 pub const L1: [[u8; 3]; 2] = [[0, 0, 1], [1, 1, 1]];
@@ -44,6 +43,7 @@ pub struct Tetris
     pub current_shape: Option<u8>,
     center: Option<(f32, f32)>,
     pub current_piece: Option<Vec<(usize, usize)>>,
+    pub score: u16,
 }
 
 impl Tetris
@@ -56,93 +56,88 @@ impl Tetris
             current_shape: Option::None,
             center: Option::None,
             current_piece: Option::None,
+            score: 0,
         }
     }
 
-    pub async fn start(kill_wt: broadcast::Sender<bool>, kc: mpsc::Sender<bool>, tx: Sender<Command>, rx: Receiver<Event>) /*-> Vec<(usize, usize)>*/
+    pub async fn start(kill_webtetris: broadcast::Sender<bool>, _start_ended_confirm: mpsc::Sender<bool>, command_transmitter: Sender<Command>, event_receiver: Receiver<Event>)
     {
-        let (kill_start, mut ks_r) = mpsc::channel::<bool>(1);
-        let ks1 = kill_start.clone();
-        let ks2 = kill_start.clone();
-        drop(kill_start);
-        let tx2 = tx.clone();
-        let mut tw_r_main = kill_wt.subscribe();
+        let (start_ended, mut start_ended_receiver) = mpsc::channel::<bool>(1);
+        let handle_events_ended = start_ended.clone();
+        let refresh_ended = start_ended.clone();
+        drop(start_ended);
+        let command_transmitter_main = command_transmitter.clone();
+        let mut wt_die_main = kill_webtetris.subscribe();
         tokio::select!
         {
-            _ = tw_r_main.recv() => {}
+            _ = wt_die_main.recv() => {}
             _ = async move
             {
-                let mut tw_r_clone1 = kill_wt.subscribe();
-                let mut tw_r_clone2 = kill_wt.subscribe();
-                let tx2 = tx.clone();
-                let tx3 = tx.clone();
+                let mut wt_die_handle_events = kill_webtetris.subscribe();
+                let mut wt_die_refresh = kill_webtetris.subscribe();
+                let command_transmitter_handle_events = command_transmitter.clone();
+                let command_transmitter_refresh = command_transmitter.clone();
 
                 let handle_events = async move
                 {
-                    ks1.max_capacity();
                     tokio::select!
                     {
-                        _ = tw_r_clone1.recv() => {}
+                        _ = wt_die_handle_events.recv() => {}
                         _ = async move
                         {
                             loop
                             {
-                                if let Ok(msg) = rx.recv().await
+                                if let Ok(msg) = event_receiver.recv().await
                                 {
                                     match msg
                                     {
-                                        Event::Undroppable => tx2.try_send(Command::InsertPiece),
+                                        Event::Undroppable => command_transmitter_handle_events.try_send(Command::InsertPiece),
                                     };
                                 }
                             }
                         } => {}
                     };
+                    drop(handle_events_ended);
                 };
                 
                 let refresh = async move
                 {
-                    ks2.max_capacity();
                     tokio::select!
                     {
-                        _ = tw_r_clone2.recv() => {}
+                        _ = wt_die_refresh.recv() => {}
                         _ = async move
                         {
                             loop
                             {
-                                tx3.try_send(Command::Refresh);
+                                command_transmitter_refresh.try_send(Command::Refresh);
                                 sleep(Duration::from_millis(50)).await;
                             }
                         } => {}
                     };
+                    drop(refresh_ended);
                 };
 
                 tokio::spawn(handle_events);
                 tokio::spawn(refresh);
                 loop
                 {
-                    tx.try_send(Command::Move('D'));
+                    command_transmitter_main.try_send(Command::Move('D'));
                     sleep(Duration::from_millis(500)).await;
                 }
             } => {}
         };
-        ks_r.recv().await;
+        start_ended_receiver.recv().await;
     }
     
     pub fn insert_shape<const W: usize, const H: usize>(&mut self, shape: [[u8; W]; H]) -> Vec<(usize, usize)>
     {
-        let between = Uniform::from(0..=(10 - shape[0].len()));
-        ////////////////////////////////////////
+        let random_number_range = Uniform::from(0..=(10 - shape[0].len()));
         let mut rng = thread_rng();
-        let starting_column = between.sample(&mut rng);
-        // let starting_column = between.sample(&mut self.rng);
+        let starting_column = random_number_range.sample(&mut rng);
         let mut center = self.shape_center();
         center.1 += starting_column as f32;
         self.center = Option::Some(center);
-        let mut current_shape: u8 = 0;
-        if let Some(p) = self.current_shape
-        {
-            current_shape = p;
-        }
+        let current_shape: u8 = self.current_shape.unwrap();
 
         let mut points: Vec<(usize, usize)> = vec![];
         for (i, row) in shape.iter().enumerate()
@@ -161,13 +156,10 @@ impl Tetris
 
     pub fn move_to(&mut self, piece: &mut Vec<(usize, usize)>, direction: char) -> Result<Vec<(usize, usize)>, Undroppable>
     {
-        let mut points = piece.to_vec();
+        let points = piece.to_vec();
         if !self.movable_to(&points, direction)
         {
-            let (mut smallest_y,
-                mut smallest_x,
-                mut biggest_y,
-                mut biggest_x,) = Self::dimensions(&points);
+            let (smallest_y, _, _, _) = Self::dimensions(&points);
             if smallest_y == 0 && direction == 'D'
             {
                 return Result::Err(Undroppable::Lost(points));
@@ -176,7 +168,7 @@ impl Tetris
         }
         let mut shapes: Vec<u8> = vec![];
         let mut new_points: Vec<(usize, usize)> = vec![];
-        for (i, (y, x)) in points.iter().enumerate()
+        for (y, x) in &points
         {
             shapes.push(*self.board.get_element(*y, *x));
             self.board.set_element(*y, *x, 0);
@@ -226,7 +218,7 @@ impl Tetris
     {
         let mut side_points: Vec<(usize, usize)> = vec![];
         let mut coordinate_values: Vec<usize> = vec![];
-        for (i, (y, x)) in points.iter().enumerate()
+        for (y, x) in points
         {
             let coordinate: usize = 
                 if direction == 'D' { x.clone() }
@@ -236,7 +228,7 @@ impl Tetris
                 coordinate_values.push(coordinate);
             }
         }
-        for (i, coordinate_value) in coordinate_values.iter().enumerate()
+        for coordinate_value in &coordinate_values
         {
             let mut points_on_a_line = points
                 .iter()
@@ -249,7 +241,7 @@ impl Tetris
                 .next()
                 .unwrap()
                 .clone();
-            for (j, point) in points_on_a_line.enumerate()
+            for point in points_on_a_line
             {
                 match direction
                 {
@@ -279,7 +271,7 @@ impl Tetris
             }
             side_points.push(side_point);
         }
-        for (i, point) in side_points.iter().enumerate()
+        for point in &side_points
         {
             match direction
             {
@@ -359,7 +351,7 @@ impl Tetris
             filled_lines.push(i);
         }
         let mut index = 0;
-        'outer_loop: for i in 0..22
+        'outer_loop: for _ in 0..22
         {
             for j in 0..10
             {
@@ -376,7 +368,7 @@ impl Tetris
 
     pub fn set_points_to(&mut self, points: &Vec<(usize, usize)>, value: u8)
     {
-        for (i, point) in points.iter().enumerate()
+        for point in points
         {
             self.board.set_element(point.0, point.1, value);
         }
@@ -407,7 +399,7 @@ impl Tetris
         }
     }
 
-    // this function has a bug where it can
+    // This function has a bug where it can
     // attach adjacent blocks to the piece
     // that's being rotated.
     // will fix later.
@@ -430,7 +422,7 @@ impl Tetris
         let min_x: isize = (center.1 - ((length - 1.0) / 2.0) as f32) as isize;
         let max_x: isize = (center.1 + ((length - 1.0) / 2.0) as f32) as isize;
         let mut m = 0;
-        let mut n = 0;
+        let mut n;
         let mut current_shape: u8 = 0;
         if let Some(c) = self.current_shape
         {
@@ -468,7 +460,6 @@ impl Tetris
         }
 
         m = 0;
-        n = 0;
         let mut new_points = vec![];
         for i in min_y..=max_y
         {
@@ -497,7 +488,7 @@ impl Tetris
         points[0].1,
         points[0].0,
         points[0].1,);
-        for (i, point) in points.iter().enumerate()
+        for point in points
         {
             let (y, x) = (point.0, point.1);
             smallest_x = if smallest_x > x { x } else { smallest_x };
@@ -519,10 +510,10 @@ impl Tetris
             Option::Some(center) => center,
             Option::None => panic!(),
         };
-        let mut min_y: u8 = (center.0 - ((max_length - 1.0) / 2.0) as f32) as u8;
-        let mut max_y: u8 = (center.0 + ((max_length - 1.0) / 2.0) as f32) as u8;
-        let mut min_x: u8 = (center.1 - ((max_length - 1.0) / 2.0) as f32) as u8;
-        let mut max_x: u8 = (center.1 + ((max_length - 1.0) / 2.0) as f32) as u8;
+        let min_y: u8 = (center.0 - ((max_length - 1.0) / 2.0) as f32) as u8;
+        let max_y: u8 = (center.0 + ((max_length - 1.0) / 2.0) as f32) as u8;
+        let min_x: u8 = (center.1 - ((max_length - 1.0) / 2.0) as f32) as u8;
+        let max_x: u8 = (center.1 + ((max_length - 1.0) / 2.0) as f32) as u8;
         let mut matrix: Vec<Vec<u8>> = vec![];
         for y in min_y..=max_y
         {
@@ -579,53 +570,6 @@ impl Tetris
         return true;
     }
 
-    fn some_point(&self) -> (usize, usize)
-    {
-        for i in 0..22
-        {
-            for j in 0..10
-            {
-                if *self.board.get_element(i, j) > 0
-                {
-                    return (i, j);
-                }
-            }
-        }
-        return (0, 0);
-    }
-
-    fn all_points_equal_to(&self, value: u8) -> Vec<(usize, usize)>
-    {
-        let mut points = vec![];
-        for i in 0..22
-        {
-            for j in 0..10
-            {
-                if *self.board.get_element(i, j) == value
-                {
-                    points.push((i, j));
-                }
-            }
-        }
-        points
-    }
-
-    fn all_non_zero_points(&self) -> Vec<(usize, usize)>
-    {
-        let mut points = vec![];
-        for i in 0..22
-        {
-            for j in 0..10
-            {
-                if *self.board.get_element(i, j) > 0
-                {
-                    points.push((i, j));
-                }
-            }
-        }
-        points
-    }
-
     fn line(l: usize) -> Vec<(usize, usize)>
     {
         let mut points = vec![];
@@ -636,40 +580,36 @@ impl Tetris
         points
     }
 
-    pub fn clear_lines(&mut self)
+    pub fn clear_lines(&mut self) -> u16
     {
         let filled_lines = self.check_filled_lines();
         if filled_lines.len() == 0
         {
-            return;
+            return 0;
         }
-        for (i, line) in filled_lines.iter().enumerate()
+        for line in &filled_lines
         {
             self.set_line_to(*line, 0);
         }
 
-        let mut points = vec![];
         for i in (0..22).rev()
         {
-            points = Self::line(i);
+            let points = Self::line(i);
             self.hard_drop(&points);
         }
 
-        // self.score(filled_lines.len());
+        Self::score(filled_lines.len())
     }
-}
 
-fn find<T, Y>(collection: &Vec<T>, target: &Y) -> Result<usize, usize>
-where
-    Y: Ord,
-    T: std::cmp::PartialEq<Y>,
-{
-    for (i, item) in collection.iter().enumerate()
+    fn score(num_lines: usize) -> u16
     {
-        if item == target
+        match num_lines
         {
-            return Result::Ok(i);
+            1 => 100,
+            2 => 250,
+            3 => 400,
+            4 => 700,
+            _ => todo!(),
         }
     }
-    return Result::Err(0);
 }
