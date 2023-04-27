@@ -5,5 +5,4 @@ use game_server::game_server_controller;
 async fn main()
 {
     tokio::spawn(game_server_controller()).await.unwrap();
-    println!("help I'm being held hostage.");
 }
