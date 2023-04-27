@@ -11,6 +11,9 @@ use serde::Deserialize;
 use rand::{distributions::{Distribution, Uniform}, thread_rng};
 use tungstenite::protocol::Message;
 
+const BACKEND: &str = "127.0.0.1:12346";
+const LISTEN_ON: &str = "0.0.0.0:12345";
+
 #[derive(Deserialize)]
 struct UserMessage
 {
@@ -49,51 +52,14 @@ struct WebTetrisData
     kill_games: Option<broadcast::Sender<bool>>,
 }
 
-async fn game_server_basic(
-    mut die: broadcast::Receiver<bool>,
-    _confirm_die: mpsc::Sender<bool>)
-{   
-    let (confirm_game_end, mut kc_r) = mpsc::channel::<bool>(1);
-    let (kill_games, _) = broadcast::channel::<bool>(1);
-    let (sender, _) = mpsc::channel::<Option<(String, WebSocketStream<TcpStream>, Option<u16>)>>(2);
-    let listener = TcpListener::bind("127.0.0.1:12345").await.unwrap();
-    tokio::select!
-    {
-        _ = die.recv() => {kill_games.send(true);}
-        _ = async
-        {
-            loop
-            {
-                let dg_clone = kill_games.subscribe();
-                let cge_clone = confirm_game_end.clone();
-                let sender_clone = sender.clone();
-                let mut players = vec![];
-                for _ in 0..2
-                {
-                    let (stream, _) = listener.accept().await.unwrap();
-                    let ws_stream = tokio_tungstenite::accept_async(stream)
-                        .await
-                        .unwrap();
-                    
-                    players.push((String::from("it's a me, mario!"), ws_stream));
-                }
-                tokio::spawn(WebTetris::new(dg_clone, cge_clone, players, sender_clone));
-                break;
-            }
-        } => {}
-    };
-    drop(confirm_game_end);
-    kc_r.recv().await;
-}
-
 async fn game_server(
     mut die: broadcast::Receiver<bool>,
-    _confirm_die: mpsc::Sender<bool>)
+    _game_server_ended: mpsc::Sender<bool>)
 {
     let (confirm_game_end, mut game_ended_receiver) = mpsc::channel::<bool>(1);
     let (kill_games, _) = broadcast::channel::<bool>(1);
     let gamerooms: Arc<Mutex<Vec<GameRoom>>> = Arc::new(Mutex::new(Vec::new()));
-    let listener = TcpListener::bind("0.0.0.0:12345").await.unwrap();
+    let listener = TcpListener::bind(LISTEN_ON).await.unwrap();
     tokio::select!
     {
         _ = die.recv() => {kill_games.send(true);}
@@ -132,14 +98,14 @@ async fn game_server(
 
 pub async fn game_server_controller()
 {
-    let (_kill_game, die) = broadcast::channel::<bool>(1);
-    let (kill_confirm, mut kc_r) = mpsc::channel::<bool>(1);
-    tokio::spawn(game_server(die, kill_confirm));
+    let (_kill_game, game_server_die) = broadcast::channel::<bool>(1);
+    let (game_server_ended, mut game_server_ended_receiver) = mpsc::channel::<bool>(1);
+    tokio::spawn(game_server(game_server_die, game_server_ended));
 
     // control the game_server with a remote connection
     // and all that fancy stuff, BUT, for later.
 
-    kc_r.recv().await;
+    game_server_ended_receiver.recv().await;
 }
 
 async fn handle_connection(
@@ -295,7 +261,7 @@ async fn authenticate(mut ws_stream: WebSocketStream<TcpStream>) -> Result<(Stri
         if let Ok(usermsg) = serde_json::from_str::<UserMessage>(&msg.to_string())
         {
             let mut comms: Comms = Comms::new();
-            comms.connect_to("127.0.0.1:8585").await;
+            comms.connect_to(BACKEND).await;
             comms.send(String::from(msg.to_string())).await.unwrap();
             s = comms.receive().await.unwrap();
             if s == "authentic"
@@ -389,7 +355,7 @@ async fn add_score(username: String, score: u16)
     let msg = format!("{{\"command\":\"add_score\", \"score\":\"{}\", \"username\":\"{}\"}}", score, username);
     println!("{}", msg);
     let mut comms: Comms = Comms::new();
-    comms.connect_to("127.0.0.1:8585").await;
+    comms.connect_to(BACKEND).await;
     comms.send(String::from(msg.to_string())).await.unwrap();
 }
 
