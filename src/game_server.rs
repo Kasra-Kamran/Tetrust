@@ -10,7 +10,9 @@ use futures_util::{StreamExt, TryStreamExt, future::{BoxFuture, FutureExt}, Sink
 use serde::Deserialize;
 use rand::{distributions::{Distribution, Uniform}, thread_rng};
 use tungstenite::protocol::Message;
+use std::env;
 
+static mut AUTHENTICATE: bool = true;
 const BACKEND: &str = "127.0.0.1:12346";
 const LISTEN_ON: &str = "0.0.0.0:12345";
 
@@ -56,6 +58,19 @@ async fn game_server(
     mut die: broadcast::Receiver<bool>,
     _game_server_ended: mpsc::Sender<bool>)
 {
+    unsafe
+    {
+        AUTHENTICATE = match env::var("AUTHENTICATE")
+        {
+            Err(_) => true,
+            Ok(a) =>
+            {
+                if a == "0" { false } else { true }
+            }
+        };
+    }
+    
+
     let (confirm_game_end, mut game_ended_receiver) = mpsc::channel::<bool>(1);
     let (kill_games, _) = broadcast::channel::<bool>(1);
     let gamerooms: Arc<Mutex<Vec<GameRoom>>> = Arc::new(Mutex::new(Vec::new()));
@@ -260,6 +275,14 @@ async fn authenticate(mut ws_stream: WebSocketStream<TcpStream>) -> Result<(Stri
     {
         if let Ok(usermsg) = serde_json::from_str::<UserMessage>(&msg.to_string())
         {
+            unsafe
+            {
+                if !AUTHENTICATE
+                {
+                    ws_stream = ws_incoming.reunite(ws_outgoing).unwrap();
+                    return Ok((usermsg.username.unwrap(), ws_stream));
+                }
+            }
             let mut comms: Comms = Comms::new();
             comms.connect_to(BACKEND).await;
             comms.send(String::from(msg.to_string())).await.unwrap();
@@ -352,6 +375,13 @@ fn join_game(
 
 async fn add_score(username: String, score: u16)
 {
+    unsafe
+    {
+        if !AUTHENTICATE
+        {
+            return;
+        }
+    }
     let msg = format!("{{\"command\":\"add_score\", \"score\":\"{}\", \"username\":\"{}\"}}", score, username);
     println!("{}", msg);
     let mut comms: Comms = Comms::new();
